@@ -1,47 +1,37 @@
 resource "aws_vpc" "main" {
 
-    cidr_block = "10.5.0.0/16"
+    cidr_block = var.cidr
 
     tags = {
-        Name = "Main VPC"
+        env = var.tag_env
     }
 }
 
-resource "aws_subnet" "subnet_public_1a" {
-  vpc_id     = aws_vpc.main.id
-  cidr_block = "10.5.1.0/24"
-  availability_zone = "us-east-1a"
+data "aws_availability_zones" "az" {}
+
+resource "aws_subnet" "public_subnet" {
+  count = length(var.public_subnets)
+
+  vpc_id   = aws_vpc.main.id
+  cidr_block = var.public_subnets[count.index]
+  availability_zone = data.aws_availability_zones.az.names[count.index]
   map_public_ip_on_launch = true
   tags = {
-    Name = "Public 1a"
+    env = var.tag_env,
+    Name = "${var.public_subnet_prefix}${count.index}"
   }
 }
 
-resource "aws_subnet" "subnet_public_1b" {
-  vpc_id     = aws_vpc.main.id
-  cidr_block = "10.5.2.0/24"
-  availability_zone = "us-east-1b"
-  map_public_ip_on_launch = true
-  tags = {
-    Name = "Public 1b"
-  }
-}
+resource "aws_subnet" "private_subnet" {
+  count = length(var.private_subnets)
 
-resource "aws_subnet" "subnet_private_1a" {
-  vpc_id     = aws_vpc.main.id
-  cidr_block = "10.5.11.0/24"
-  availability_zone = "us-east-1a"
-  tags = {
-    Name = "Private 1a"
-  }
-}
+  vpc_id   = aws_vpc.main.id
+  cidr_block = var.private_subnets[count.index]
+  availability_zone = data.aws_availability_zones.az.names[count.index]
 
-resource "aws_subnet" "subnet_private_1b" {
-  vpc_id     = aws_vpc.main.id
-  cidr_block = "10.5.12.0/24"
-  availability_zone = "us-east-1b"
   tags = {
-    Name = "Private 1b"
+    env = var.tag_env,
+    Name = "${var.private_subnet_prefix}${count.index}"
   }
 }
 
@@ -49,7 +39,8 @@ resource "aws_internet_gateway" "main_igw" {
   vpc_id = aws_vpc.main.id
 
   tags = {
-    Name = "Main Internet Gateway"
+    Name = "Internet Gateway",
+    env = var.tag_env,
   }
 }
 
@@ -62,131 +53,55 @@ resource "aws_route_table" "public_route_table" {
   }
 
   tags = {
-    Name = "Public route table"
+    Name = "Public Route Table",
+    env = var.tag_env
   }
 }
 
-resource "aws_route_table_association" "public_1a" {
-  subnet_id      = aws_subnet.subnet_public_1a.id
+resource "aws_route_table_association" "public_route_table_assoc" {
+  count = length(var.public_subnets)
+  subnet_id      = aws_subnet.public_subnet[count.index].id
   route_table_id = aws_route_table.public_route_table.id
 }
 
-resource "aws_route_table_association" "public_1b" {
-  subnet_id      = aws_subnet.subnet_public_1b.id
-  route_table_id = aws_route_table.public_route_table.id
-}
-
-resource "aws_eip" "nat_ip_public_1a" {
+resource "aws_eip" "nat_public_ip" {
+  count = length(var.public_subnets)
   vpc      = true
   tags = {
-    Name = "Elastic IP - NAT Gw (Public 1a)"
+    Name = "Elastic IP - NAT Gateway",
+    env = var.tag_env
   }
 }
 
-resource "aws_eip" "nat_ip_public_1b" {
-  vpc      = true
-  tags = {
-    Name = "Elastic IP - NAT Gw (Public 1b)"
-  }
-}
+resource "aws_nat_gateway" "nat_gw" {
+  count = length(var.public_subnets)
 
-resource "aws_nat_gateway" "nat_gw_1a" {
-  allocation_id = aws_eip.nat_ip_public_1a.id
-  subnet_id     = aws_subnet.subnet_private_1a.id
-
+  allocation_id = aws_eip.nat_public_ip[count.index].id
+  subnet_id     = aws_subnet.public_subnet[count.index].id
 
   tags = {
-    Name = "NAT Gw Public 1a"
+    Name = "Public Nat Gateway - ${count.index}"
   }
 }
 
-resource "aws_nat_gateway" "nat_gw_1b" {
-  allocation_id = aws_eip.nat_ip_public_1b.id
-  subnet_id     = aws_subnet.subnet_private_1b.id
+resource "aws_route_table" "private_route_table" {
+  count = length(var.private_subnets)
+  vpc_id = aws_vpc.main.id
 
-
-  tags = {
-    Name = "NAT Gw Public 1b"
-  }
-}
-
-resource "aws_security_group" "internal_server_sg" {
-  name        = "Internal Server Security Group"
-  description = "Allow SSH inbound traffic from Bastion Host only"
-  vpc_id      = aws_vpc.main.id
-
-  ingress {
-    description      = "SSH from Bastion Host"
-    from_port        = 0
-    to_port          = 22
-    protocol         = "tcp"
-    security_groups = [aws_security_group.bastion_host_sg.id]
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_nat_gateway.nat_gw[count.index].id
   }
 
   tags = {
-    Name = "Internal Server"
+    Name = "Private Route Table",
+    env = var.tag_env
   }
 }
 
+resource "aws_route_table_association" "private_route_table_assoc" {
+  count = length(var.private_subnets)
 
-resource "aws_security_group" "bastion_host_sg" {
-  name        = "Bastion Host Security Group"
-  description = "Allow SSH inbound traffic"
-  vpc_id      = aws_vpc.main.id
-
-  ingress {
-    description      = "SSH from Internet"
-    from_port        = 0
-    to_port          = 22
-    protocol         = "tcp"
-    cidr_blocks      = ["0.0.0.0/0"]
-  }
-
-  egress {
-    from_port        = 0
-    to_port          = 0
-    protocol         = "-1"
-    cidr_blocks      = ["0.0.0.0/0"]
-    ipv6_cidr_blocks = ["::/0"]
-  }
-
-  tags = {
-    Name = "Bastion Host"
-  }
-}
-
-
-data "aws_ami" "amzn-linux-2023-ami" {
-  most_recent = true
-  owners      = ["amazon"]
-
-  filter {
-    name   = "name"
-    values = ["al2023-ami-2023.*-x86_64"]
-  }
-}
-
-
-resource "aws_instance" "bastion-host" {
-  ami           = data.aws_ami.amzn-linux-2023-ami.id
-  instance_type = "t2.micro"
-  subnet_id     = aws_subnet.subnet_public_1a.id
-
-  security_groups = [aws_security_group.bastion_host_sg.id]
-
-  tags = {
-    Name = "bastion-host"
-  }
-}
-
-resource "aws_instance" "internal-server" {
-  ami           = data.aws_ami.amzn-linux-2023-ami.id
-  instance_type = "t2.micro"
-  subnet_id     = aws_subnet.subnet_private_1b.id
-
-  security_groups = [aws_security_group.internal_server_sg.id]
-  
-  tags = {
-    Name = "internal-server"
-  }
+  subnet_id      = aws_subnet.private_subnet[count.index].id
+  route_table_id = aws_route_table.private_route_table[count.index].id
 }
